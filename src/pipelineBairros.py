@@ -8,6 +8,7 @@ from utilsGeo import normalizar_nome_bairro
 
 ROOT = Path(__file__).resolve().parent.parent
 GEOJSON_BAIRROS = ROOT / "data" / "raw" / "Limite_de_Bairros.geojson"
+IPS_XLSX = ROOT / "data" / "raw" / "ips.xlsx"
 INTERIM = ROOT / "data" / "interim"
 
 CRS_LATLON = "EPSG:4326"
@@ -67,6 +68,32 @@ def fazer_spatial_join_paradas_bairros(
     return paradas_em_bairros
 
 
+def carregar_ips_por_ra() -> pd.DataFrame:
+    """Lê o IPS por Região Administrativa (aba Plan1 do xlsx do IPP).
+
+    A Plan1 traz 32 RAs com IPS calculado e os indicadores brutos por trás dele.
+    Útil pra cruzar com bairros (broadcast por regiao_adm/codra), já que o IPS
+    nativamente não desce a nível de bairro.
+
+    Colunas: regiao_adm_norm, regiao_adm_orig, ips, + indicadores brutos.
+    """
+    df = pd.read_excel(IPS_XLSX, sheet_name='Plan1', engine='openpyxl')
+    df = df.rename(columns={'Unnamed: 0': 'regiao_adm_orig', 'IPS': 'ips'})
+    df = df.dropna(subset=['regiao_adm_orig', 'ips'])
+    df['regiao_adm_norm'] = df['regiao_adm_orig'].map(normalizar_nome_bairro)
+
+    cols_chave = ['regiao_adm_norm', 'regiao_adm_orig', 'ips']
+    indicadores = [c for c in df.columns if c not in cols_chave]
+    df = df[cols_chave + indicadores].reset_index(drop=True)
+
+    assert 32 <= len(df) <= 33, f"esperado 32-33 RAs, veio {len(df)}"
+    assert df['regiao_adm_norm'].is_unique, \
+        f"regiao_adm_norm tem duplicatas: {df[df['regiao_adm_norm'].duplicated()]['regiao_adm_norm'].tolist()}"
+    assert df['ips'].between(0, 100).all(), "IPS fora do range 0-100"
+
+    return df
+
+
 if __name__ == '__main__':
     bairros = carregar_bairros()
     print(f'Bairros carregados: {len(bairros)}')
@@ -97,3 +124,15 @@ if __name__ == '__main__':
     out = INTERIM / 'paradas_em_bairros.parquet'
     paradas_em_bairros.to_parquet(out)
     print(f'\nSalvo: {out.relative_to(ROOT)}')
+
+    print('\n=== IPS por RA (aba Plan1) ===')
+    ips = carregar_ips_por_ra()
+    print(f'RAs com IPS: {len(ips)}')
+    print(f'IPS médio: {ips["ips"].mean():.2f}')
+    print(f'IPS min/max: {ips["ips"].min():.2f} / {ips["ips"].max():.2f}')
+    print(f'Colunas: {len(ips.columns)} (3 chave + {len(ips.columns)-3} indicadores)')
+
+    print('\nTop 3 IPS:')
+    print(ips.nlargest(3, 'ips')[['regiao_adm_norm', 'ips']].to_string(index=False))
+    print('\nBottom 3 IPS:')
+    print(ips.nsmallest(3, 'ips')[['regiao_adm_norm', 'ips']].to_string(index=False))
