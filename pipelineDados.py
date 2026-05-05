@@ -1,7 +1,8 @@
 #pipeline deserto transportes
 import pandas as pd
-from shapely import LineString, wkt, Point
-
+import geopandas as gpd
+import numpy as np
+from shapely import wkt
 
 '''Lendo todos os arquivos do GTFS (mesmo os que não usaremos, devem ser retirados mais tarde)'''
 agency = pd.read_csv("agency.csv")
@@ -63,6 +64,17 @@ trips = pd.read_csv("trips.csv")
 #'feed_version', 'feed_start_date', 'feed_end_date', 'route_id','service_id', 'trip_id', 'trip_headsign', 'trip_short_name',
 #'direction_id', 'block_id', 'shape_id', 'wheelchair_accessible','bikes_allowed', 'versao_modelo'
 
+# Após cada read_csv dos arquivos que vão ser usados:
+stops = stops.sort_values('feed_start_date').drop_duplicates(subset='stop_id', keep='last')
+routes = routes.sort_values('feed_start_date').drop_duplicates(subset='route_id', keep='last')
+shapesGeom = shapesGeom.sort_values('feed_start_date').drop_duplicates(subset='shape_id', keep='last')
+
+# trips precisa do par (route_id, shape_id) único, não trip_id
+# (porque trips tem milhões de execuções planejadas)
+trips_unicos = trips[['route_id', 'shape_id', 'trip_id']].drop_duplicates()
+
+# algumas paradas estão com coordenadas vazias
+stops = stops.dropna(subset=['stop_lat', 'stop_lon'])
 
 '''Tirando colunas desnecessárias dos dados de interesse'''
 routes = routes.drop(columns=['feed_version', 'feed_start_date', 
@@ -89,37 +101,81 @@ shapesGeom = shapesGeom.drop(columns=['feed_version', 'feed_start_date', 'feed_e
 def quantidadeDeViagensPorRota():
     '''Conta quantas viagens são feitas por rota. Cria um dataframe (viagensRota) que possui como colunas: id da rota("route_id"), 
     quantidade de viagens("count") e nome da rota("route_long_name).'''
-    quantidades = trips["route_id"].value_counts().reset_index()
+    quantidades = trips_unicos["route_id"].value_counts().reset_index()
     viagensRota = quantidades.merge(routes[['route_id', 'route_long_name']], on='route_id', how='left')
     return viagensRota
      
 
 
-def pegarTodasParadas():
-    '''Para cada shape, listar todos stops que passam por ela.'''
-    todasParadas = pd.DataFrame(columns=["shape", "paradas"])
-    i=0
-    for linestring in shapesGeom["shape"]:
-        linha = wkt.loads(linestring)
-        paradas = [ ]
-        for pontos in stops.itertuples():
-            latitude = float(pontos[3])
-            longitude = float(pontos[4])
-            coordenada = Point(longitude, latitude)
-            if linha.distance(coordenada)<=0.00002:
-                paradas.append(pontos[2])
-        todasParadas.loc[i] = [linestring, paradas]
-        i+=1
-    print(todasParadas)
-    return todasParadas
-            
-
-        
+def pegarTodasParadas(buffer_metros=30):
+    '''
+    Para cada shape, listar todas as paradas próximas (dentro de `buffer_metros`).
+    
+    Substitui o for por join vetorizado (geopandas).
+    Reprojeta para trabalhar em metros, o valor de 30m é a tolerância padrão da literatura de transporte público, suficiente para capturar a diferença 
+    entre o eixo da via (onde o shape é desenhado) e a calçada (onde fica a parada).
+    '''
+    # 1. Converter shapes para GeoDataFrame
+    shapes_df = shapesGeom.copy()
+    shapes_df['geometry'] = shapes_df['shape'].apply(
+        lambda s: wkt.loads(s) if pd.notna(s) else None
+    )
+    shapes_df = shapes_df.dropna(subset=['geometry'])
+    shapes_gdf = gpd.GeoDataFrame(shapes_df, geometry='geometry', crs='EPSG:4326')
+    
+    # 2. Converter stops para GeoDataFrame de pontos
+    stops_gdf = gpd.GeoDataFrame(
+        stops,
+        geometry=gpd.points_from_xy(stops['stop_lon'], stops['stop_lat']),
+        crs='EPSG:4326'
+    )
+    
+    # 3. Reprojetar para EPSG:31983 (UTM 23S, métrico — padrão IBGE pro Rio)
+    shapes_metric = shapes_gdf.to_crs('EPSG:31983')
+    stops_metric = stops_gdf.to_crs('EPSG:31983')
+    
+    # 4. Buffer em metros ao redor de cada shape
+    shapes_metric['geometry'] = shapes_metric.geometry.buffer(buffer_metros)
+    
+    # 5. Spatial join — uma operação, vetorizada
+    paradas_por_shape = gpd.sjoin(
+        stops_metric[['stop_id', 'geometry']],
+        shapes_metric[['shape_id', 'geometry']],
+        how='inner',
+        predicate='within'
+    )
+    
+    # 6. Agrupar para retornar uma lista de paradas por shape
+    resultado = (paradas_por_shape
+                 .groupby('shape_id')['stop_id']
+                 .apply(list)
+                 .reset_index()
+                 .rename(columns={'stop_id': 'paradas'}))
+    
+    return resultado
 
 viagensRota = quantidadeDeViagensPorRota()
-print(viagensRota)
+#print(viagensRota)
 
 #pegarTodasParadas()
+
+if __name__ == '__main__':
+    print('=== Quantidade de viagens por rota ===')
+    viagensRota = quantidadeDeViagensPorRota()
+    print(viagensRota.head(10))
+    
+    print('\n=== Inferindo paradas por shape (buffer 30m) ===')
+    paradas_por_shape = pegarTodasParadas(buffer_metros=30)
+    
+    # Sanity check
+    n_paradas = paradas_por_shape['paradas'].apply(len)
+    print(f'Shapes com paradas: {len(paradas_por_shape):,}')
+    print(f'Mediana de paradas por shape: {n_paradas.median():.0f}')
+    print(f'Min/Max: {n_paradas.min()} / {n_paradas.max()}')
+    
+    # Salvar
+    paradas_por_shape.to_parquet('paradas_por_shape.parquet')
+    print('\n✓ Salvo: paradas_por_shape.parquet')
 
 
     
