@@ -1,0 +1,7 @@
+.venv/
+
+src/__pycache__
+
+# Dados brutos (baixados do Drive — não versionar) e intermediários (gerados pelo pipeline)
+data/raw/
+data/interim/
