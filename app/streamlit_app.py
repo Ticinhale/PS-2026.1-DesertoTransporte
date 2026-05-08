@@ -19,19 +19,76 @@ st.set_page_config(
 )
 
 
+# Tipologia dos bairros (resultado do K-Means com k=6 — notebooks/modelagem.ipynb)
+NOMES_CLUSTERS = {
+    0: "Periferia Densa Urbana",
+    1: "Bairros Privilegiados",
+    2: "Periferia Territorial Vulnerável",
+    3: "Desertos Sociais Críticos",
+    4: "Hubs de Linhas Estratégicos",
+    5: "Megabairros de Corredor",
+}
+
+CORES_CLUSTERS = {
+    0: "#3498db",  # azul
+    1: "#f1c40f",  # amarelo
+    2: "#2ecc71",  # verde
+    3: "#e74c3c",  # vermelho
+    4: "#9b59b6",  # roxo
+    5: "#1abc9c",  # ciano
+}
+
+DESCRICOES_CLUSTERS = {
+    0: (
+        "Periferia consolidada do subúrbio carioca: alta densidade populacional, "
+        "**boa cobertura espacial de paradas (≈92%)**, mas IPS baixo. O DTI fica em patamar "
+        "médio porque a oferta existe — o que pesa é a vulnerabilidade social acumulada."
+    ),
+    1: (
+        "Bairros tradicionais bem servidos (Zona Sul, Tijuca, Vila Isabel): "
+        "**maior IPS (≈84)** e cobertura alta. DTI mais baixo do município — "
+        "referência de equilíbrio oferta/demanda."
+    ),
+    2: (
+        "Extremos territoriais e enclaves isolados (Gericinó, Grumari, Complexo do Alemão): "
+        "**baixa cobertura espacial (≈49%)** e baixa densidade. O deserto aqui é geográfico — "
+        "áreas mal alcançadas pela rede convencional."
+    ),
+    3: (
+        "Bairros com **DTI mais alto do município (≈59)**: Rocinha, Acari, Costa Barros, Pavuna. "
+        "Combinam alta densidade, IPS muito baixo e cobertura razoável — o transporte chega, "
+        "mas a vulnerabilidade estrutural domina o índice."
+    ),
+    4: (
+        "Hubs centrais e corredores com **alta diversidade de linhas (≈142 linhas)**: "
+        "Maré, Centro, Lapa, Vasco da Gama. Cobertura quase total e boa conectividade — "
+        "papel sistêmico na rede."
+    ),
+    5: (
+        "Megabairros do oeste (Santa Cruz, Bangu, Realengo, Jacarepaguá, Guaratiba): "
+        "**número absoluto enorme de paradas (≈283)** mas dispersas em áreas gigantes — "
+        "cobertura efetiva baixa (≈40%) apesar do volume de infraestrutura."
+    ),
+}
+
+
 # Carregamento de dados
 @st.cache_data
 def carregar_dados():
-    """Carrega o parquet final do pipeline."""
-    df = gpd.read_parquet("data/processed/bairros_dti.parquet")
+    """Carrega o parquet final do pipeline (com clusters da modelagem)."""
+    df = gpd.read_parquet("data/processed/bairros_dti_clusters.parquet")
     df = df.set_crs("EPSG:4326")
-    
+
     # Tratar NaN no headway (apenas GRUMARI e GERICINÓ)
     df["headway_medio_min"] = df["headway_medio_min"].fillna(0)
-    
-    # Calcular paradas_por_km2 (não salvo no parquet original)
-    df["paradas_por_km2"] = df["n_paradas"] / df["area_km2"]
-    
+
+    # Calcular paradas_por_km2 caso não esteja no parquet
+    if "paradas_por_km2" not in df.columns:
+        df["paradas_por_km2"] = df["n_paradas"] / df["area_km2"]
+
+    # Aplicar nomes dos clusters
+    df["nome_cluster"] = df["cluster"].map(NOMES_CLUSTERS)
+
     return df
 
 
@@ -79,10 +136,11 @@ with st.sidebar:
 
 
 # Abas principais
-aba1, aba2, aba3 = st.tabs([
+aba1, aba2, aba3, aba4 = st.tabs([
     "🗺️ Mapa Interativo",
     "📋 Ranking dos Desertos",
     "🔮 Simulador de Intervenção",
+    "🎯 Tipologia dos Bairros",
 ])
 
 
@@ -446,7 +504,7 @@ with aba3:
             "principal mensagem do projeto."
         )
     
-    #  Aviso técnico 
+    #  Aviso técnico
     with st.expander("⚠️ Sobre a precisão desta simulação"):
         st.markdown(
             "O cálculo de DTI simulado é uma **aproximação direcional** baseada na variação "
@@ -454,4 +512,186 @@ with aba3:
             "Para o cálculo exato do DTI seria necessário re-rodar o pipeline completo de "
             "normalização contra os 164 bairros, o que não é possível em tempo real. "
             "**O simulador serve para explorar tendências, não como ferramenta de planejamento operacional.**"
+        )
+
+
+# ABA 4 — TIPOLOGIA DOS BAIRROS (K-MEANS)
+with aba4:
+    st.markdown("### Tipologia dos bairros do Rio")
+    st.markdown(
+        "Aplicação de **K-Means (k=6)** sobre as features de oferta e demanda "
+        "(densidade, IPS, paradas, cobertura, linhas, headway) revela **6 perfis distintos** "
+        "de bairros. A tipologia mostra que o DTI alto não tem uma única causa: pode ser "
+        "vulnerabilidade social, isolamento territorial ou sobrecarga de demanda."
+    )
+
+    #  Mapa colorido por cluster
+    st.markdown("---")
+    st.markdown("#### 🗺️ Mapa da tipologia")
+
+    centro_rio_t = [-22.91, -43.40]
+    m_cluster = folium.Map(
+        location=centro_rio_t,
+        zoom_start=11,
+        tiles="cartodbpositron",
+    )
+
+    for cluster_id, nome in NOMES_CLUSTERS.items():
+        sub = df[df["cluster"] == cluster_id]
+        cor = CORES_CLUSTERS[cluster_id]
+        folium.GeoJson(
+            sub,
+            name=f"{cluster_id} — {nome}",
+            style_function=lambda _x, cor=cor: {
+                "fillColor": cor,
+                "color": "white",
+                "weight": 0.5,
+                "fillOpacity": 0.75,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["bairro", "regiao_adm", "nome_cluster", "DTI", "ips", "cobertura_400m"],
+                aliases=["Bairro:", "Região Adm:", "Tipologia:", "DTI:", "IPS:", "Cobertura 400m:"],
+                localize=True,
+                sticky=False,
+                style="""
+                    background-color: white;
+                    border: 1px solid grey;
+                    border-radius: 3px;
+                    padding: 6px;
+                    font-size: 12px;
+                """,
+            ),
+        ).add_to(m_cluster)
+
+    folium.LayerControl(collapsed=False).add_to(m_cluster)
+    st_folium(m_cluster, width=None, height=600, returned_objects=[])
+
+    # Legenda lado a lado
+    st.markdown("**Legenda:**")
+    legend_cols = st.columns(3)
+    for i, (cid, nome) in enumerate(NOMES_CLUSTERS.items()):
+        n_b = (df["cluster"] == cid).sum()
+        with legend_cols[i % 3]:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+                f"<span style='display:inline-block;width:14px;height:14px;background:{CORES_CLUSTERS[cid]};"
+                f"border-radius:3px;border:1px solid #ccc;'></span>"
+                f"<span><b>{cid}</b> — {nome} ({n_b})</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    #  Tabela de perfis
+    st.markdown("---")
+    st.markdown("#### 📊 Perfis comparativos dos clusters")
+    st.markdown(
+        "Médias de cada feature por cluster — útil pra entender o que diferencia cada perfil."
+    )
+
+    perfis = df.groupby("cluster").agg(
+        n_bairros=("bairro", "count"),
+        DTI_medio=("DTI", "mean"),
+        IPS_medio=("ips", "mean"),
+        densidade=("densidade_hab_km2", "mean"),
+        n_paradas=("n_paradas", "mean"),
+        cobertura=("cobertura_400m", "mean"),
+        headway=("headway_medio_min", "mean"),
+        n_linhas=("n_linhas", "mean"),
+    ).round(1)
+    perfis.insert(0, "Tipologia", perfis.index.map(NOMES_CLUSTERS))
+    perfis = perfis.rename(columns={
+        "n_bairros": "Nº bairros",
+        "DTI_medio": "DTI",
+        "IPS_medio": "IPS",
+        "densidade": "Densidade (hab/km²)",
+        "n_paradas": "Paradas",
+        "cobertura": "Cobertura 400m",
+        "headway": "Headway (min)",
+        "n_linhas": "Linhas",
+    })
+
+    st.dataframe(
+        perfis,
+        use_container_width=True,
+        column_config={
+            "Cobertura 400m": st.column_config.ProgressColumn(
+                "Cobertura 400m",
+                min_value=0.0,
+                max_value=1.0,
+                format="%.2f",
+            ),
+            "Densidade (hab/km²)": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+
+    #  Drill-down por cluster
+    st.markdown("---")
+    st.markdown("#### 🔎 Análise detalhada por tipologia")
+
+    cluster_sel = st.selectbox(
+        "Selecione uma tipologia",
+        options=list(NOMES_CLUSTERS.keys()),
+        format_func=lambda c: f"{c} — {NOMES_CLUSTERS[c]}",
+    )
+
+    sub = df[df["cluster"] == cluster_sel].sort_values("DTI", ascending=False)
+    cor_sel = CORES_CLUSTERS[cluster_sel]
+
+    st.markdown(
+        f"<div style='border-left:6px solid {cor_sel};padding:12px 16px;"
+        f"background:rgba(255,255,255,0.05);"
+        f"border-radius:4px;margin:12px 0;'>"
+        f"<h4 style='margin:0 0 6px 0;color:inherit;'>{cluster_sel} — {NOMES_CLUSTERS[cluster_sel]}</h4>"
+        f"<p style='margin:0;color:inherit;'>{DESCRICOES_CLUSTERS[cluster_sel]}</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Nº de bairros", len(sub))
+    col_m2.metric("DTI médio", f"{sub['DTI'].mean():.1f}")
+    col_m3.metric("IPS médio", f"{sub['ips'].mean():.1f}")
+    col_m4.metric("Cobertura 400m média", f"{sub['cobertura_400m'].mean()*100:.0f}%")
+
+    st.markdown("**Bairros desta tipologia (ordenados por DTI):**")
+    tabela_cluster = sub[[
+        "bairro", "regiao_adm", "DTI", "ips",
+        "cobertura_400m", "n_paradas", "n_linhas",
+    ]].copy()
+    tabela_cluster.columns = [
+        "Bairro", "Região Adm", "DTI", "IPS",
+        "Cobertura 400m", "Nº Paradas", "Nº Linhas",
+    ]
+    tabela_cluster["DTI"] = tabela_cluster["DTI"].round(1)
+    tabela_cluster["IPS"] = tabela_cluster["IPS"].round(1)
+    tabela_cluster["Cobertura 400m"] = (sub["cobertura_400m"].astype(float) * 100).round(1)
+
+    st.dataframe(
+        tabela_cluster,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Cobertura 400m": st.column_config.ProgressColumn(
+                "Cobertura 400m (%)",
+                min_value=0.0,
+                max_value=100.0,
+                format="%.1f%%",
+            ),
+        },
+        height=min(500, 60 + 35 * len(sub)),
+    )
+
+    with st.expander("ℹ️ Como a tipologia foi construída"):
+        st.markdown(
+            "**Algoritmo:** K-Means (scikit-learn) com `k=6`, `random_state=42`, `n_init=10`.\n\n"
+            "**Features padronizadas** (StandardScaler) usadas no clustering:\n"
+            "- `densidade_hab_km2` — demanda demográfica\n"
+            "- `ips` — vulnerabilidade social (Índice de Progresso Social)\n"
+            "- `n_paradas`, `paradas_por_km2` — oferta absoluta e densidade\n"
+            "- `n_linhas` — diversidade da rede\n"
+            "- `cobertura_400m` — distribuição espacial das paradas\n"
+            "- `headway_medio_min` — frequência média de veículos\n\n"
+            "**Escolha de k=6** — combinação do método do cotovelo + silhouette score, "
+            "balanceando interpretabilidade e poder discriminatório.\n\n"
+            "**Leitura central:** o DTI é um índice contínuo, mas a tipologia mostra que "
+            "bairros com DTI parecido podem ter **causas diferentes** (vulnerabilidade social vs. "
+            "isolamento territorial vs. sobrecarga de demanda) — e portanto exigem **intervenções diferentes**."
         )
